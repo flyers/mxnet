@@ -77,7 +77,8 @@ def discount_return(x, discount):
 
 def rollout(env, agent, max_path_length=np.inf):
 
-    reward = []
+    rewards = []
+    actions = []
     o = env.reset()
     # agent.reset()
     path_length = 0
@@ -85,22 +86,29 @@ def rollout(env, agent, max_path_length=np.inf):
         o = o.reshape((1, -1))
         a = agent.get_action(o)
         next_o, r, d, _ = env.step(a)
-        reward.append(r)
+        rewards.append(r)
+        actions.append(a)
         path_length += 1
         if d:
             break
         o = next_o
 
-    return reward
+    return dict(
+        actions=actions,
+        rewards=rewards,
+    )
 
 
 def sample_rewards(env, policy, eval_samples, max_path_length=np.inf):
 
-    rewards = []
-    for _ in range(eval_samples):
-        rewards.append(rollout(env, policy, max_path_length))
+    results = []
+    count = 0
+    while count < eval_samples:
+        path = rollout(env, policy, max_path_length)
+        results.append(path)
+        count += len(path['rewards'])
 
-    return rewards
+    return results
 
 
 

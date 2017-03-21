@@ -9,28 +9,30 @@ import numpy as np
 class DDPG(object):
 
     def __init__(
-        self,
-        env,
-        policy,
-        qfunc,
-        strategy,
-        ctx=mx.gpu(0),
-        batch_size=32,
-        n_epochs=1000,
-        epoch_length=1000,
-        memory_size=1000000,
-        memory_start_size=1000,
-        discount=0.99,
-        max_path_length=1000,
-        eval_samples=10000,
-        qfunc_updater="adam",
-        qfunc_lr=1e-4,
-        policy_updater="adam",
-        policy_lr=1e-4,
-        soft_target_tau=1e-3,
-        n_updates_per_sample=1,
-        include_horizon_terminal=False,
-        seed=12345):
+            self,
+            env,
+            policy,
+            qfunc,
+            strategy,
+            ctx=mx.gpu(0),
+            batch_size=32,
+            n_epochs=200,
+            epoch_length=1000,
+            memory_size=1000000,
+            memory_start_size=10000,
+            discount=0.99,
+            max_path_length=250,
+            eval_samples=10000,
+            qfunc_updater="adam",
+            qfunc_lr=1e-4,
+            policy_updater="adam",
+            policy_lr=1e-4,
+            soft_target_tau=1e-3,
+            n_updates_per_sample=1,
+            include_horizon_terminal=False,
+            scale_reward=1.0,
+            save_dir='',
+            seed=12345):
 
         mx.random.seed(seed)
         np.random.seed(seed)
@@ -65,13 +67,15 @@ class DDPG(object):
         self.q_averages = []
         self.y_averages = []
         self.strategy_path_returns = []
+        self.save_dir = save_dir
 
+        self.scale_reward = scale_reward
 
     def init_net(self):
 
         # qfunc init
 
-        qfunc_init = mx.initializer.Normal()
+        # qfunc_init = mx.initializer.Normal()
         loss_symbols = self.qfunc.get_loss_symbols()
         qval_sym = loss_symbols["qval"]
         yval_sym = loss_symbols["yval"]
@@ -89,7 +93,7 @@ class DDPG(object):
         self.qfunc.define_loss(qfunc_loss)
         self.qfunc.define_exe(
             ctx=self.ctx,
-            init=qfunc_init,
+            # init=qfunc_init,
             updater=qfunc_updater,
             input_shapes=self.qfunc_input_shapes)
 
@@ -107,7 +111,7 @@ class DDPG(object):
 
         # policy init
 
-        policy_init = mx.initializer.Normal()
+        # policy_init = mx.initializer.Normal()
         loss_symbols = self.policy.get_loss_symbols()
         act_sym = loss_symbols["act"]
         policy_qval = qval_sym
@@ -123,11 +127,11 @@ class DDPG(object):
             "obs": (self.batch_size, self.env.observation_space.flat_dim)}
         self.policy.define_exe(
             ctx=self.ctx,
-            init=policy_init,
+            # init=policy_init,
             updater=policy_updater,
             input_shapes=self.policy_input_shapes)
 
-        # policy network and q-value network are combined to backpropage
+        # policy network and q-value network are combined to backpropagate
         # gradients from the policy loss
         # since the loss is different, yval is not needed
         args = {}
@@ -196,9 +200,9 @@ class DDPG(object):
                 if not end and path_length >= self.max_path_length:
                     end = True
                     if self.include_horizon_terminal:
-                        memory.add_sample(obs, act, rwd, end)
+                        memory.add_sample(obs, act, rwd * self.scale_reward, end)
                 else:
-                    memory.add_sample(obs, act, rwd, end)
+                    memory.add_sample(obs, act, rwd * self.scale_reward, end)
 
                 obs = nxt
 
@@ -211,7 +215,11 @@ class DDPG(object):
 
             logger.log("Training finished")
             if memory.size >= self.memory_start_size:
+                end = True
                 self.evaluate(epoch, memory)
+                # save the parameter of the current iteration
+                self.policy.save_params(dir_path=self.save_dir, itr=epoch)
+                self.qfunc.save_params(dir_path=self.save_dir, itr=epoch)
             logger.dump_tabular(with_prefix=False)
             logger.pop_prefix()
 
@@ -268,15 +276,21 @@ class DDPG(object):
 
     def evaluate(self, epoch, memory):
 
-        if epoch == self.n_epochs - 1:
-            logger.log("Collecting samples for evaluation")
-            rewards = sample_rewards(env=self.env,
-                                     policy=self.policy,
-                                     eval_samples=self.eval_samples,
-                                     max_path_length=self.max_path_length)
-            average_discounted_return = np.mean(
-                [discount_return(reward, self.discount) for reward in rewards])
-            returns = [sum(reward) for reward in rewards]
+        logger.log("Collecting samples for evaluation")
+        paths = sample_rewards(env=self.env,
+                               policy=self.policy,
+                               eval_samples=self.eval_samples,
+                               max_path_length=self.max_path_length)
+        average_discounted_return = np.mean(
+            [discount_return(path['rewards'], self.discount) for path in paths]
+        )
+        average_episode_length = np.mean(
+            [len(path["rewards"]) for path in paths]
+        )
+        returns = [sum(path["rewards"]) for path in paths]
+        average_action = np.mean(np.square(np.concatenate(
+            [path["actions"] for path in paths]
+        )))
 
         all_qs = np.concatenate(self.q_averages)
         all_ys = np.concatenate(self.y_averages)
@@ -285,17 +299,16 @@ class DDPG(object):
         average_policy_loss = np.mean(self.policy_loss_averages)
 
         logger.record_tabular('Epoch', epoch)
-        if epoch == self.n_epochs - 1:
-            logger.record_tabular('AverageReturn',
+        logger.record_tabular('AverageReturn',
                               np.mean(returns))
-            logger.record_tabular('StdReturn',
+        logger.record_tabular('StdReturn',
                               np.std(returns))
-            logger.record_tabular('MaxReturn',
+        logger.record_tabular('MaxReturn',
                               np.max(returns))
-            logger.record_tabular('MinReturn',
+        logger.record_tabular('MinReturn',
                               np.min(returns))
-            logger.record_tabular('AverageDiscountedReturn',
-                              average_discounted_return)
+        logger.record_tabular('AverageEpisodeLength', average_episode_length)
+        logger.record_tabular('AverageAction', average_action)
         if len(self.strategy_path_returns) > 0:
             logger.record_tabular('AverageEsReturn',
                                   np.mean(self.strategy_path_returns))
@@ -305,8 +318,11 @@ class DDPG(object):
                                   np.max(self.strategy_path_returns))
             logger.record_tabular('MinEsReturn',
                                   np.min(self.strategy_path_returns))
+
+        logger.record_tabular('AverageDiscountedReturn',
+                              average_discounted_return)
         logger.record_tabular('AverageQLoss', average_qfunc_loss)
-        logger.record_tabular('AveragePolicyLoss', average_policy_loss)
+        logger.record_tabular('AveragePolicySurr', average_policy_loss)
         logger.record_tabular('AverageQ', np.mean(all_qs))
         logger.record_tabular('AverageAbsQ', np.mean(np.abs(all_qs)))
         logger.record_tabular('AverageY', np.mean(all_ys))
