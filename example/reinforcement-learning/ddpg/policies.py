@@ -137,7 +137,7 @@ class DeterministicMLPPolicy(Policy):
         return self.exe_one.outputs[0].asnumpy()[0]
 
     def save_params(self, dir_path='', name='PolicyNet', itr=None, ctx=mx.cpu()):
-        save_dict = {('arg:%s' % k): v.copyto(ctx) for k, v in self.arg_dict.items()}
+        save_dict = {('arg:%s' % k): v.copyto(ctx) for k, v in self.arg_dict.items() if k != 'obs'}
         prefix = os.path.join(dir_path, name)
         if itr is not None:
             param_save_path = os.path.join('%s-%05d.params' % (prefix, itr))
@@ -145,6 +145,17 @@ class DeterministicMLPPolicy(Policy):
             param_save_path = os.path.join('%s.params' % prefix)
         mx.nd.save(param_save_path, save_dict)
 
+    def load_params(self, dir_path='', name='PolicyNet', itr=None):
+        prefix = os.path.join(dir_path, name)
+        if itr is not None:
+            param_save_path = os.path.join('%s-%05d.params' % (prefix, itr))
+        else:
+            param_save_path = os.path.join('%s.params' % prefix)
+        save_dict = mx.nd.load(param_save_path)
+        save_dict.pop('arg:obs')
+        for k, v in save_dict.items():
+            tp, name = k.split(':', 1)
+            self.arg_dict[name][:] = save_dict[k]
 
 
 
